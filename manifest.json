@@ -1,15 +1,19 @@
 {
   "schemaVersion": 1,
   "id": "xela.home-assistant",
-  "name": "Home Assistant",
+  "name": "Home Assistant Dashboard",
   "version": "1.0.0",
   "author": "xela",
   "license": "MIT",
-  "description": "Controls Home Assistant entities from the default dashboard.",
-  "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "description": "Mirrors your Home Assistant dashboard in the bar: lights, switches, scenes, climate, covers and sensors, live.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
   "barWidget": {
-    "displayName": "Home Assistant",
+    "displayName": "Home Assistant Dashboard",
     "description": "Lights, switches, scenes and sensors from your dashboard",
     "category": "System",
     "allowMultiple": false,

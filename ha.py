@@ -4,9 +4,11 @@
 Holds one WebSocket connection to Home Assistant and speaks JSON lines:
   stdout: {"type": "status" | "layout" | "states" | "state" | "error", ...}
   stdin:  {"domain": "light", "service": "toggle", "entity_id": "...", "data": {...}}
+          {"dashboard": "dashboard-infra"}
 
-Entities come from the default dashboard; an auto-generated dashboard falls
-back to grouping by area, like Home Assistant does itself. Python stdlib only.
+Entities come from the chosen dashboard (stdin {"dashboard": url_path}, kept
+in the config file); an auto-generated dashboard falls back to grouping by
+area, like Home Assistant does itself. Python stdlib only.
 """
 import base64
 import json
@@ -23,15 +25,32 @@ from urllib.parse import urlparse
 CONFIG = os.path.expanduser("~/.config/omarchy/home-assistant.json")
 
 
-def load_url():
+DEFAULT_DASHBOARD = "lovelace"
+
+
+def load_config():
     try:
         with open(CONFIG) as f:
-            return json.load(f)["url"].rstrip("/")
-    except (OSError, ValueError, KeyError, AttributeError):
-        return "http://homeassistant.local:8123"
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-URL = load_url()
+def save_dashboard(url_path):
+    cfg = load_config()
+    cfg["dashboard"] = url_path
+    try:
+        tmp = CONFIG + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cfg, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, CONFIG)
+    except OSError:
+        pass
+
+
+URL = str(load_config().get("url") or "http://homeassistant.local:8123").rstrip("/")
 
 # Attributes the widget actually reads; everything else stays out of the pipe.
 ATTRS = ("friendly_name", "unit_of_measurement", "device_class", "icon",
@@ -91,7 +110,7 @@ class WebSocket:
         while b"\r\n\r\n" not in head:
             chunk = sock.recv(4096)
             if not chunk:
-                raise ConnectionError("Handshake abgebrochen")
+                raise ConnectionError("Handshake aborted")
             head += chunk
         head, self.buf = head.split(b"\r\n\r\n", 1)
         if b" 101 " not in head.split(b"\r\n", 1)[0]:
@@ -125,7 +144,7 @@ class WebSocket:
         """Receive what is available and return the complete text messages."""
         chunk = self.sock.recv(1 << 16)
         if not chunk:
-            raise ConnectionError("Verbindung geschlossen")
+            raise ConnectionError("Connection closed")
         self.buf += chunk
         out = []
         while True:
@@ -147,7 +166,7 @@ class WebSocket:
             if opcode == 0x9:
                 self._send(0xA, payload)
             elif opcode == 0x8:
-                raise ConnectionError("Server hat die Verbindung geschlossen")
+                raise ConnectionError("Server closed the connection")
             elif opcode in (0x0, 0x1):
                 self.fragments.append(payload)
                 if fin:
@@ -230,11 +249,12 @@ def area_layout(areas, devices, entities, states):
         for eid in sorted(groups[name], key=rank):
             friendly = states[eid]["attributes"].get("friendly_name") or eid
             # Home Assistant drops the area name from entity names in its own
-            # area cards: "Küche Licht" in Küche reads as "Licht".
+            # area cards: "Kitchen Light" in Kitchen reads as "Light".
             if name and friendly.lower().startswith(name.lower() + " "):
                 friendly = friendly[len(name) + 1:]
             ents.append({"id": eid, "name": friendly})
-        sections.append({"title": name or "Sonstige", "entities": ents})
+        # An empty title is the "no area" section; the widget names it.
+        sections.append({"title": name, "entities": ents})
     return sections
 
 
@@ -247,7 +267,9 @@ def finish_layout(sections, states):
             if e["id"] in states and e["id"] not in seen:
                 seen.add(e["id"])
                 ents.append({k: v for k, v in e.items() if v})
-        if ents:
+        if ents and out and out[-1]["title"] == s["title"]:
+            out[-1]["entities"] += ents  # untitled cards of one view
+        elif ents:
             out.append({"title": s["title"], "entities": ents})
     return out, seen
 
@@ -264,6 +286,20 @@ class Session:
         self.pending = {}  # id -> handler name
         self.states, self.results = {}, {}
         self.watched = set()
+        self.dashboard = str(load_config().get("dashboard") or DEFAULT_DASHBOARD)
+
+    def request_dashboard(self):
+        msg = {"type": "lovelace/config"}
+        if self.dashboard != DEFAULT_DASHBOARD:
+            msg["url_path"] = self.dashboard
+        self.request("lovelace:" + self.dashboard, msg)
+
+    def set_dashboard(self, url_path):
+        self.dashboard = str(url_path or DEFAULT_DASHBOARD)
+        save_dashboard(self.dashboard)
+        for k in ("lovelace", "_done"):
+            self.results.pop(k, None)
+        self.request_dashboard()
 
     def request(self, name, msg):
         msg["id"] = self.next_id
@@ -276,17 +312,34 @@ class Session:
         if t == "auth_required":
             self.ws.send({"type": "auth", "access_token": self.token})
         elif t == "auth_invalid":
-            raise PermissionError("Token ungültig")
+            raise PermissionError("auth_invalid")
         elif t == "auth_ok":
             emit({"type": "status", "connected": True, "version": msg.get("ha_version")})
             self.request("states", {"type": "get_states"})
-            self.request("lovelace", {"type": "lovelace/config"})
+            self.request("dashboards", {"type": "lovelace/dashboards/list"})
+            self.request_dashboard()
             self.request("subscribe", {"type": "subscribe_events", "event_type": "state_changed"})
         elif t == "result":
             name = self.pending.pop(msg["id"], None)
             if name == "call" and not msg.get("success"):
-                emit({"type": "error", "message": (msg.get("error") or {}).get("message", "Aktion fehlgeschlagen")})
-            elif name in ("states", "lovelace", "areas", "devices", "entities"):
+                emit({"type": "error", "message": (msg.get("error") or {}).get("message", "Action failed")})
+            elif name == "dashboards":
+                boards = [{"id": DEFAULT_DASHBOARD, "title": "Overview"}]
+                for d in (msg.get("result") if msg.get("success") else None) or []:
+                    if d.get("url_path") == DEFAULT_DASHBOARD:
+                        boards[0]["title"] = d.get("title") or "Overview"
+                    elif d.get("url_path"):
+                        boards.append({"id": d["url_path"], "title": d.get("title") or d["url_path"]})
+                emit({"type": "dashboards", "dashboards": boards})
+            elif name == "lovelace:" + self.dashboard:
+                self.results["lovelace"] = msg.get("result") if msg.get("success") else None
+                self.maybe_layout()
+            elif name == "states":
+                # Kept current by state_changed events from here on.
+                self.states = {s["entity_id"]: s for s in msg.get("result") or []}
+                self.results["states"] = True
+                self.maybe_layout()
+            elif name in ("areas", "devices", "entities"):
                 self.results[name] = msg.get("result") if msg.get("success") else None
                 self.maybe_layout()
         elif t == "event":
@@ -303,7 +356,6 @@ class Session:
             return
         if r.get("_done"):
             return
-        self.states = {s["entity_id"]: s for s in r["states"] or []}
         cfg = r["lovelace"]
         if isinstance(cfg, dict) and cfg.get("views"):
             sections = dashboard_layout(cfg)
@@ -320,7 +372,7 @@ class Session:
             sections = area_layout(r["areas"] or [], r["devices"] or [], r["entities"] or [], self.states)
         r["_done"] = True
         sections, self.watched = finish_layout(sections, self.states)
-        emit({"type": "layout", "sections": sections,
+        emit({"type": "layout", "sections": sections, "dashboard": self.dashboard,
               "source": "dashboard" if isinstance(cfg, dict) and cfg.get("views") else "areas"})
         emit({"type": "states", "states": {e: slim(self.states[e]) for e in self.watched}})
 
@@ -329,6 +381,9 @@ class Session:
             c = json.loads(line)
         except ValueError:
             return
+        if "dashboard" in c:
+            self.set_dashboard(c["dashboard"])
+            return
         self.request("call", {"type": "call_service", "domain": c["domain"], "service": c["service"],
                               "service_data": c.get("data") or {}, "target": {"entity_id": c["entity_id"]}})
 
@@ -336,7 +391,7 @@ class Session:
 def run_once(stdin_buf):
     tok = token()
     if not tok:
-        raise PermissionError("Kein Token im Schlüsselbund")
+        raise PermissionError("no_token")
     ws = WebSocket(URL)
     session = Session(ws, tok)
     try:
@@ -368,7 +423,7 @@ def main():
         try:
             run_once(stdin_buf)
         except PermissionError as e:
-            emit({"type": "status", "connected": False, "error": str(e), "auth": True})
+            emit({"type": "status", "connected": False, "auth": str(e)})
             backoff = 30
         except (OSError, ConnectionError, ValueError) as e:
             if time.time() - started > 60:

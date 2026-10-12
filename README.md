@@ -1,11 +1,16 @@
-# Omarchy Home Assistant
+# Home Assistant Dashboard for Omarchy
 
-An Omarchy bar widget that controls [Home Assistant](https://www.home-assistant.io/)
-from the bar.
+An Omarchy bar widget that brings your [Home Assistant](https://www.home-assistant.io/)
+dashboard into the bar. There is nothing to arrange in the widget:
+it shows what your dashboard shows.
 
-The popup mirrors your default dashboard. If that dashboard is auto-generated,
+![The popup with rooms, lights, scenes and sensors](preview.png)
+
+The popup mirrors one of your dashboards; with more than one, a row of
+buttons at the top switches between them and the choice is remembered in
+`~/.config/omarchy/home-assistant.json`. If a dashboard is auto-generated,
 it groups entities by area the way Home Assistant does, leaving out
-unavailable entities. Entities without an area land in a folded "Sonstige"
+unavailable entities. Entities without an area land in a folded "Other"
 section. Every section folds with a click on its header.
 
 - **Lights, switches, fans, input booleans** — on/off switch; dimmable lights
@@ -50,6 +55,16 @@ omarchy plugin add https://github.com/xela-io/omarchy-homeassistant.git --enable
    ```
 
 4. Right-click the bar icon to reconnect.
+
+### Language
+
+The popup is in German when the system locale is German and in English
+otherwise. Pin it with a `language` setting on the widget's entry in
+`~/.config/omarchy/shell.json`:
+
+```json
+{ "id": "xela.home-assistant", "language": "de" }
+```
 
 ## How it works
 

@@ -14,15 +14,24 @@ Panel {
   readonly property string helperPath: Quickshell.env("HOME") + "/.config/omarchy/plugins/xela.home-assistant/ha.py"
 
   property var sections: []
+  // [{ id: url_path, title }] from Home Assistant; the choice lives in ha.py's config.
+  property var dashboards: []
+  property string dashboard: ""
   property var states: ({})
   // states is mutated in place; bindings read `rev` to notice.
   property int rev: 0
   property bool connected: false
   property bool started: false
-  property bool authError: false
+  property string authError: ""  // "no_token" | "auth_invalid" | ""
   property string error: ""
   property string actionError: ""
   property var palette: ({})
+
+  // German or English: the widget's "language" setting in shell.json wins,
+  // otherwise the system locale decides.
+  readonly property bool german: String(setting("language", Qt.locale().name)).indexOf("de") === 0
+  readonly property var locale: Qt.locale(german ? "de_DE" : "en_US")
+  function tr(en, de) { return german ? de : en }
 
   readonly property int lightsOn: {
     rev
@@ -38,18 +47,20 @@ Panel {
     return bar ? bar.barForeground : Color.foreground
   }
   readonly property string headline: {
-    if (!started) return "Verbinde …"
-    if (!connected) return error || "Nicht verbunden"
-    if (lightsOn === 1) return "1 Licht an"
-    if (lightsOn > 1) return lightsOn + " Lichter an"
-    return "Alle Lichter aus"
+    if (!started) return tr("Connecting …", "Verbinde …")
+    if (authError === "no_token") return tr("No token in the keyring", "Kein Token im Schlüsselbund")
+    if (authError === "auth_invalid") return tr("Token rejected", "Token ungültig")
+    if (!connected) return error || tr("Not connected", "Nicht verbunden")
+    if (lightsOn === 1) return tr("1 light on", "1 Licht an")
+    if (lightsOn > 1) return lightsOn + tr(" lights on", " Lichter an")
+    return tr("All lights off", "Alle Lichter aus")
   }
   function themeColor(name, fallback) { return palette[name] || fallback }
 
-  // Sections the user folded or unfolded this session; "Sonstige" (entities
-  // without an area) starts folded because it is mostly diagnostics.
+  // Sections the user folded or unfolded this session. The section without an
+  // area (title "") starts folded because it is mostly diagnostics.
   property var folds: ({})
-  function isFolded(title) { return folds[title] !== undefined ? folds[title] : title === "Sonstige" }
+  function isFolded(title) { return folds[title] !== undefined ? folds[title] : title === "" }
   function setFolded(title, folded) {
     var next = Object.assign({}, folds)
     next[title] = folded
@@ -68,10 +79,13 @@ Panel {
       started = true
       if (m.url) haUrl = m.url
       connected = !!m.connected
-      authError = !!m.auth
+      authError = m.auth || ""
       error = m.error || ""
+    } else if (m.type === "dashboards") {
+      dashboards = m.dashboards
     } else if (m.type === "layout") {
       sections = m.sections
+      dashboard = m.dashboard || ""
     } else if (m.type === "states") {
       states = m.states
       rev++
@@ -87,6 +101,12 @@ Panel {
   function call(domain, service, entityId, data) {
     if (!helper.running) return
     helper.write(JSON.stringify({ domain: domain, service: service, entity_id: entityId, data: data || {} }) + "\n")
+  }
+
+  function selectDashboard(id) {
+    if (!helper.running || id === dashboard) return
+    dashboard = id
+    helper.write(JSON.stringify({ dashboard: id }) + "\n")
   }
 
   // Flip the local state right away; the state_changed event confirms or reverts it.
@@ -140,37 +160,52 @@ Panel {
   }
 
   function number(v, digits) {
-    return Number(v).toLocaleString(Qt.locale("de_DE"), "f", digits)
+    return Number(v).toLocaleString(locale, "f", digits)
   }
+
+  // [on, off] wording per binary_sensor device class, English then German.
+  readonly property var binaryLabels: ({
+    door: [["open", "closed"], ["offen", "zu"]],
+    garage_door: [["open", "closed"], ["offen", "zu"]],
+    window: [["open", "closed"], ["offen", "zu"]],
+    opening: [["open", "closed"], ["offen", "zu"]],
+    motion: [["motion", "clear"], ["Bewegung", "ruhig"]],
+    occupancy: [["occupied", "clear"], ["belegt", "frei"]],
+    presence: [["home", "away"], ["anwesend", "abwesend"]],
+    moisture: [["wet", "dry"], ["nass", "trocken"]],
+    connectivity: [["connected", "disconnected"], ["verbunden", "getrennt"]],
+    battery: [["low", "OK"], ["schwach", "OK"]],
+    lock: [["unlocked", "locked"], ["offen", "verriegelt"]],
+    problem: [["problem", "OK"], ["Problem", "OK"]],
+    smoke: [["smoke!", "clear"], ["Rauch!", "OK"]],
+    plug: [["plugged in", "unplugged"], ["eingesteckt", "aus"]]
+  })
+  readonly property var stateLabels: ({
+    on: ["on", "an"], off: ["off", "aus"], open: ["open", "offen"], closed: ["closed", "zu"],
+    opening: ["opening", "öffnet"], closing: ["closing", "schließt"],
+    locked: ["locked", "verriegelt"], unlocked: ["unlocked", "entriegelt"],
+    home: ["home", "zu Hause"], not_home: ["away", "abwesend"],
+    playing: ["playing", "spielt"], paused: ["paused", "pausiert"], idle: ["idle", "bereit"],
+    standby: ["standby", "Standby"], unavailable: ["unavailable", "nicht verfügbar"], unknown: ["unknown", "unbekannt"]
+  })
 
   function stateLabel(domain, s, attrs) {
     var v = s.state
-    if (v === "unavailable") return "nicht verfügbar"
-    if (v === "unknown") return "unbekannt"
+    var i = german ? 1 : 0
     var dc = attrs.device_class || ""
-    if (domain === "binary_sensor") {
-      var on = v === "on"
-      var pairs = {
-        door: ["offen", "zu"], garage_door: ["offen", "zu"], window: ["offen", "zu"], opening: ["offen", "zu"],
-        motion: ["Bewegung", "ruhig"], occupancy: ["belegt", "frei"], presence: ["anwesend", "abwesend"],
-        moisture: ["nass", "trocken"], connectivity: ["verbunden", "getrennt"], battery: ["schwach", "OK"],
-        lock: ["offen", "verriegelt"], problem: ["Problem", "OK"], smoke: ["Rauch!", "OK"], plug: ["eingesteckt", "aus"]
+    if (v !== "unavailable" && v !== "unknown") {
+      if (domain === "binary_sensor") {
+        var on = v === "on"
+        return binaryLabels[dc] ? binaryLabels[dc][i][on ? 0 : 1] : stateLabels[on ? "on" : "off"][i]
       }
-      var p = pairs[dc] || ["an", "aus"]
-      return on ? p[0] : p[1]
+      if (domain === "media_player" && v === "playing" && attrs.media_title)
+        return (attrs.media_artist ? attrs.media_artist + " – " : "") + attrs.media_title
+      if (domain === "cover" && attrs.current_position !== undefined)
+        return attrs.current_position + " %"
+      if (dc === "timestamp" && !isNaN(Date.parse(v)))
+        return Qt.formatDateTime(new Date(v), german ? "dd.MM. HH:mm" : "MMM d, HH:mm")
     }
-    if (domain === "media_player" && v === "playing" && attrs.media_title)
-      return (attrs.media_artist ? attrs.media_artist + " – " : "") + attrs.media_title
-    if (domain === "cover" && attrs.current_position !== undefined)
-      return attrs.current_position + " %"
-    if (dc === "timestamp" && !isNaN(Date.parse(v)))
-      return Qt.formatDateTime(new Date(v), "dd.MM. HH:mm")
-    var labels = {
-      on: "an", off: "aus", open: "offen", closed: "zu", opening: "öffnet", closing: "schließt",
-      locked: "verriegelt", unlocked: "entriegelt", home: "zu Hause", not_home: "abwesend",
-      playing: "spielt", paused: "pausiert", idle: "bereit", standby: "Standby"
-    }
-    if (labels[v]) return labels[v]
+    if (stateLabels[v]) return stateLabels[v][i]
     if (/^-?\d+(\.\d+)?$/.test(v)) {
       var digits = v.indexOf(".") < 0 ? 0 : Math.min(1, v.split(".")[1].length)
       v = number(parseFloat(v), digits)
@@ -288,10 +323,21 @@ Panel {
             color: root.started && !root.connected ? Color.urgent : Color.popups.text
             font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true
           }
+          ButtonGroup {
+            visible: root.connected && root.dashboards.length > 1
+            focusable: false
+            options: root.dashboards.map(function(d) { return { value: d.id, label: d.title } })
+            value: root.dashboard
+            foreground: Color.popups.text
+            onChanged: function(v) { root.selectDashboard(v) }
+          }
           Text {
-            visible: root.authError
+            visible: root.authError !== ""
             width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.PlainText
-            text: "In Home Assistant unter Profil → Sicherheit einen langlebigen Zugriffstoken erstellen und im Terminal speichern:\n\nsecret-tool store --label=\"Home Assistant\" service home-assistant url " + root.haUrl + "\n\nDanach mit Rechtsklick aufs Icon neu verbinden."
+            text: root.tr("Create a long-lived access token in Home Assistant under Profile → Security and store it from a terminal:",
+                          "In Home Assistant unter Profil → Sicherheit einen langlebigen Zugriffstoken erstellen und im Terminal speichern:")
+                  + "\n\nsecret-tool store --label=\"Home Assistant\" service home-assistant url " + root.haUrl + "\n\n"
+                  + root.tr("Then right-click the icon to reconnect.", "Danach mit Rechtsklick aufs Icon neu verbinden.")
             color: Color.popups.text; font.family: Style.font.family; font.pixelSize: Style.font.caption
           }
           Text {
@@ -311,12 +357,13 @@ Panel {
               spacing: Style.space(6)
 
               readonly property string title: String(modelData.title || "")
+              readonly property string label: title || root.tr("Other", "Sonstige")
               readonly property bool folded: root.isFolded(title)
 
               PanelSeparator {}
               PanelSectionHeader {
                 width: parent.width
-                text: root.glyph(section.folded ? 0xF0142 : 0xF0140) + "  " + section.title.toUpperCase()
+                text: root.glyph(section.folded ? 0xF0142 : 0xF0140) + "  " + section.label.toUpperCase()
                       + (section.folded ? "  ·  " + section.modelData.entities.length : "")
                 MouseArea {
                   anchors.fill: parent
@@ -432,7 +479,7 @@ Panel {
 
                       Button {
                         visible: row.pressable
-                        text: "Ausführen"
+                        text: root.tr("Run", "Ausführen")
                         bordered: true
                         enabled: !row.unavailable
                         onClicked: root.call(row.domain, root.pressDomains[row.domain], row.eid)
@@ -470,8 +517,8 @@ Panel {
           PanelSeparator {}
           Row {
             spacing: Style.space(8)
-            Button { text: "Home Assistant öffnen"; bordered: true; onClicked: root.openWebUi() }
-            Button { text: "Neu verbinden"; bordered: true; onClicked: root.reconnect() }
+            Button { text: root.tr("Open Home Assistant", "Home Assistant öffnen"); bordered: true; onClicked: root.openWebUi() }
+            Button { text: root.tr("Reconnect", "Neu verbinden"); bordered: true; onClicked: root.reconnect() }
           }
         }
       }
